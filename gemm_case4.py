@@ -3,6 +3,7 @@ Prob_M = 4096
 Prob_N = 4096
 Prob_K = 4096
 BLOCKS_IN_GGA = 8
+MULTICAST = 2
 K_STAGE = 6
 TILE_M_CGA = 512
 TILE_N_CGA = 512
@@ -12,7 +13,7 @@ SM_COUNTS = 24
 SM_MMA_MACS = 4096
 MMA_UTIL = 0.83
 MBARRIER_SYNC_CYCLES = 20 #?
-L2_RT_LAT = 250
+L2_RT_LAT = 270
 L2_RD_BW_PER_SM = 96
 L2_WR_BW_PER_SM = 48
 L2_UTIL = 0.85
@@ -24,15 +25,13 @@ DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
 
 class CGA:
-    def __init__(self, num_blocks, cache, k_stages):
-        self.num_blocks = num_blocks
+    def __init__(self, cache):
         self.cache = cache
-        self.k_stages = k_stages
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
-        self.tma_cycles = [0 for _ in range(self.k_stages)]
-        self.mma_cycles = [0 for _ in range(self.k_stages)]
+        self.tma_cycles = [0 for _ in range(K_STAGE)]
+        self.mma_cycles = [0 for _ in range(K_STAGE)]
     def execute(self, tile_k):
         if self.done():
             return
@@ -40,11 +39,11 @@ class CGA:
         coord_start_n = self.tile_n * TILE_N_CGA
         #print(f"Processing Coord ({coord_start_m}, {coord_start_n})")
         coord_start_k = tile_k * TILE_K
-        A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / 8
-        A_NOC_Transfer_Bytes_Per_SM = L2.sizeof("A") / 4
+        A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / BLOCKS_IN_GGA
+        A_NOC_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM * MULTICAST
         A_DDR_Transfer_Bytes_Per_SM = 0
-        B_L2C_Transfer_Bytes_Per_SM = L2.sizeof("B") / 8
-        B_NOC_Transfer_Bytes_Per_SM = L2.sizeof("B") / 4
+        B_L2C_Transfer_Bytes_Per_SM = L2.sizeof("B") / BLOCKS_IN_GGA
+        B_NOC_Transfer_Bytes_Per_SM = B_L2C_Transfer_Bytes_Per_SM * MULTICAST
         B_DDR_Transfer_Bytes_Per_SM = 0
         A_hit, evict = L2.access("A", coord_start_m, coord_start_k)
         if not A_hit:
@@ -55,7 +54,7 @@ class CGA:
         L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
         NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
         DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
-        Serilization_Cycles = max(L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM / (self.k_stages-1)), NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM / (self.k_stages-1)), DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM / (self.k_stages-1)))
+        Serilization_Cycles = max(L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM / (K_STAGE-1)), NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM / (K_STAGE-1)), DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM / (K_STAGE-1)))
         if A_hit and B_hit:
             TMA_Cycles = Serilization_Cycles + L2_RT_LAT
         else:
@@ -63,11 +62,11 @@ class CGA:
 
         MMA_Cycles = TILE_M_CGA * TILE_M_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
 
-        self.tma_cycles[tile_k % self.k_stages] = self.tma_cycles[tile_k % self.k_stages] + MBARRIER_SYNC_CYCLES + TMA_Cycles
+        self.tma_cycles[tile_k % K_STAGE] = self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         mma_idle_cycles = 0
         for stage in range(1, min(K_STAGE, tile_k+1)):
-            mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % self.k_stages], mma_idle_cycles)
-        self.mma_cycles[tile_k % self.k_stages] = max(self.tma_cycles[tile_k % self.k_stages] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
+            mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
+        self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
     def done(self):
         return self.tile_m == None or self.tile_n == None
     def cycles(self):
@@ -92,11 +91,11 @@ class L2CACHE:
     
     def sizeof(self, data_type):
         if data_type == "A":
-            return 512 * 64 * 2
+            return TILE_M_CGA * TILE_K * 2
         elif data_type == "B":
-            return 512 * 64 * 2
+            return TILE_N_CGA * TILE_K * 2
         elif data_type == "C":
-            return 512 * 512 * 2
+            return TILE_M_CGA * TILE_N_CGA * 2
         else:
             raise ValueError("Unknown data type")
 
@@ -135,7 +134,7 @@ def get_cga_tasks():
 
 task_generator = get_cga_tasks()
 total_tile_cycles = 0
-clusters = [CGA(BLOCKS_IN_GGA, L2,  K_STAGE) for _ in range(CLUSTER_COUNTS)]
+clusters = [CGA(L2) for _ in range(CLUSTER_COUNTS)]
 while(True):
     for cluster in clusters:
         (tile_m, tile_n) = next(task_generator)
