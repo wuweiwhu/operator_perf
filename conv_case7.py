@@ -125,9 +125,9 @@ class CTA:
 
         MMA_Cycles = TILE_M * TILE_N * TILE_C / (SM_MMA_MACS * MMA_UTIL)
 
-        self.tma_a_cycles[tile_k % K_STAGE] = self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
-        
+        self.tma_a_cycles[tile_k % K_STAGE] = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         self.tma_b_cycles[]
+        
         #mma_idle_cycles = 0
         #for stage in range(1, min(K_STAGE, tile_k+1)):
             #mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
