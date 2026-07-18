@@ -16,7 +16,9 @@ DILATION=1
 OUTPUT_ROWS_PER_CTA = 3
 TILE_C = 64
 TILE_M = 128
-TILE_N = 58
+TILE_N = 56
+STAGE_A = 4
+STAGE_B = 4
 K_STAGE = 4
 MULTICAST = 8
 CLUSTER_COUNTS = 3
@@ -49,7 +51,7 @@ class L2CACHE:
         elif data_type == "B":
             return TILE_N * TILE_C * 2
         elif data_type == "C":
-            return 512 * 512 * 2
+            return TILE_M * TILE_N * OUTPUT_ROWS_PER_CTA * 2
         else:
             raise ValueError("Unknown data type")
 
@@ -82,24 +84,34 @@ class CTA:
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
-        self.tma_a_cycles = [0 for _ in range(K_STAGE)]
-        self.tma_b_cycles = [0 for _ in range(K_STAGE)]
-        self.mma_cycles = [0 for _ in range(K_STAGE)]
-    
-    def execute(self, ifeature_row_iter, r_iter, s_iter, c_iter, load_ifeature):
+        #self.tma_a_cycles = [0 for _ in range(STAGE_A)]
+        #self.tma_b_cycles = [0 for _ in range(STAGE_B)]
+        self.tma_cycles = [0 for _ in range(STAGE_A)]
+        self.mma_cycles = [0 for _ in range(STAGE_A)]
+        # for detecting if stage b steped
+        self.last_stage_b = -1
+
+    def execute(self, ifeature_row_iter, r_iter, s_iter, c_iter, stage_a, stage_b):
         if self.done():
             return
         # start of output row
         coord_start_output_row = self.tile_n * OUTPUT_ROWS_PER_CTA * STRIDE_H
         coord_start_input_row = coord_start_output_row + ifeature_row_iter * STRIDE_H - PAD_H
 
-        if load_ifeature:
+        if stage_b != self.last_stage_b:
             B_hit, evict = L2.access("B", coord_start_input_row, c_iter, 0)
             B_L2C_Transfer_Bytes_Per_SM = L2.sizeof("B")
             B_NOC_Transfer_Bytes_Per_SM = B_L2C_Transfer_Bytes_Per_SM
             B_DDR_Transfer_Bytes_Per_SM = 0
             if not B_hit:
                 B_DDR_Transfer_Bytes_Per_SM = L2.sizeof("B") + evict
+            self.last_stage_b = stage_b
+        else:
+            B_hit = True
+            B_L2C_Transfer_Bytes_Per_SM = 0
+            B_DDR_Transfer_Bytes_Per_SM = 0
+            B_NOC_Transfer_Bytes_Per_SM = 0
+
 
         A_hit, evict = L2.access("A", r_iter, s_iter, c_iter)
         A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / MULTICAST
@@ -108,16 +120,12 @@ class CTA:
         if not A_hit:
             A_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("A") + evict) / MULTICAST
 
-        if load_ifeature:
-            L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
-            NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
-            DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
-        else:
-            L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM
-            NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM
-            DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM
 
-        Serilization_Cycles = max(L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM / (K_STAGE-1)), NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM / (K_STAGE-1)), DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM / (K_STAGE-1)))
+        L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
+        NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
+        DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
+        Serilization_Cycles = max(L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM / (STAGE_A-1)), NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM / (STAGE_A-1)), DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM / (STAGE_A-1)))
+
         if A_hit and B_hit:
             TMA_Cycles = Serilization_Cycles + L2_RT_LAT
         else:
@@ -125,19 +133,23 @@ class CTA:
 
         MMA_Cycles = TILE_M * TILE_N * TILE_C / (SM_MMA_MACS * MMA_UTIL)
 
-        self.tma_a_cycles[tile_k % K_STAGE] = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
-        self.tma_b_cycles[]
-        
-        #mma_idle_cycles = 0
-        #for stage in range(1, min(K_STAGE, tile_k+1)):
-            #mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
-        #self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
+        self.tma_cycles[stage_a % STAGE_A] = self.mma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES + TMA_Cycles
+        mma_idle_cycles = 0 if stage_a == 0 else self.mma_cycles[(stage_a - 1)%STAGE_A]
+        self.mma_cycles[stage_a % STAGE_A] = max(self.tma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
     def done(self):
         return self.tile_m == None or self.tile_n == None
     def cycles(self):
         if self.done():
             return 0
-        return 0
+        # FIXME
+        coord_start_m = self.tile_m * TILE_M
+        coord_start_n = self.tile_n * TILE_N
+        _, evict = L2.access("C", coord_start_m, coord_start_n, 0)
+        C_Cycles = max(L2.sizeof("C") / 8 / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT / 2, evict / 8 / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
+        TMA_Tile_Cycles = max(self.tma_cycles)
+        MMA_Tile_Cycles = max(self.mma_cycles)
+        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + max(TMA_Tile_Cycles, MMA_Tile_Cycles)
+        return Tile_Cycles
 
 def get_cta_tasks(): #persisten kernel
     tile_m = 0
@@ -164,17 +176,25 @@ while(True):
     if all_done:
         break
     
+    stage_a = 0
+    stage_b = 0
+    # mainloop
     for ifeature_row_iter in range(OUTPUT_ROWS_PER_CTA + R - 1):
         coord_start_r = max(0, ifeature_row_iter - (OUTPUT_ROWS_PER_CTA - 1))
         coord_end_r = min(R, ifeature_row_iter + 1)
         for c_iter in range(C//TILE_C):
-            load_ifeature = True
             for s_iter in range(S):
                 for r_iter in range(coord_start_r, coord_end_r):
+                    #print(ifeature_row_iter, r_iter, s_iter, c_iter, stage_a, stage_b)
                     for cta in ctas:
-                        cta.execute(ifeature_row_iter, r_iter, s_iter, c_iter, load_ifeature)
-                        #print(ifeature_row_iter, r_iter, s_iter, c_iter)
-                    load_ifeature = False
+                        cta.execute(ifeature_row_iter, r_iter, s_iter, c_iter, stage_a, stage_b)
+                    stage_a += 1
+            stage_b += 1
+                    
     for cta in ctas:
         print(cta.cycles())
         total_tile_cycles += cta.cycles()
+
+total_cycles = total_tile_cycles / SM_COUNTS
+print(f"Total cycles: {total_cycles}")
+print(f"MMA Utilization: {N * P * Q * R * S * C * K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")

@@ -63,9 +63,10 @@ class CGA:
         MMA_Cycles = TILE_M_CGA * TILE_M_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
 
         self.tma_cycles[tile_k % K_STAGE] = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
-        mma_idle_cycles = 0
-        for stage in range(1, min(K_STAGE, tile_k+1)):
-            mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
+        #mma_idle_cycles = 0
+        #for stage in range(1, min(K_STAGE, tile_k+1)):
+        #    mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
+        mma_idle_cycles = 0 if tile_k == 0 else self.mma_cycles[(tile_k - 1)%K_STAGE]
         self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
     def done(self):
         return self.tile_m == None or self.tile_n == None
