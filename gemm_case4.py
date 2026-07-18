@@ -35,8 +35,8 @@ class CGA:
     def execute(self, tile_k):
         if self.done():
             return
-        coord_start_m = self.tile_m * TILE_M_CGA
-        coord_start_n = self.tile_n * TILE_N_CGA
+        coord_start_m = self.tile_m
+        coord_start_n = self.tile_n
         #print(f"Processing Coord ({coord_start_m}, {coord_start_n})")
         coord_start_k = tile_k * TILE_K
         A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / BLOCKS_IN_GGA
@@ -62,7 +62,7 @@ class CGA:
 
         MMA_Cycles = TILE_M_CGA * TILE_M_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
 
-        self.tma_cycles[tile_k % K_STAGE] = self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
+        self.tma_cycles[tile_k % K_STAGE] = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         mma_idle_cycles = 0
         for stage in range(1, min(K_STAGE, tile_k+1)):
             mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
@@ -136,10 +136,12 @@ task_generator = get_cga_tasks()
 total_tile_cycles = 0
 clusters = [CGA(L2) for _ in range(CLUSTER_COUNTS)]
 while(True):
+    all_done = True
     for cluster in clusters:
         (tile_m, tile_n) = next(task_generator)
         cluster.bind(tile_m, tile_n)
-    if clusters[0].done() and clusters[1].done() and clusters[2].done():
+        all_done = all_done and cluster.done()
+    if all_done:
         break
     for tile_k in range(Prob_K // TILE_K):
         for cluster in clusters:
