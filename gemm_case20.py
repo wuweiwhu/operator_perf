@@ -24,10 +24,12 @@ NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
+FORCE_HIT = False
 
 class CGA:
-    def __init__(self, cache):
+    def __init__(self, cache, id):
         self.cache = cache
+        self.cga_id = id
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -102,8 +104,9 @@ class L2CACHE:
             raise ValueError("Unknown data type")
 
     def access(self, data_type, start_X, start_Y):
-        #return True, 0
         self.access_count += 1
+        if FORCE_HIT:
+            return True, 0
         if (data_type, start_X, start_Y) in self.cache:
             self.cache[(data_type, start_X, start_Y)] = self.access_count
             self.hit_count += 1
@@ -134,7 +137,7 @@ def get_cga_tasks():
 
 task_generator = get_cga_tasks()
 total_tile_cycles = 0
-clusters = [CGA(L2) for _ in range(CLUSTER_COUNTS)]
+clusters = [CGA(L2, id) for id in range(CLUSTER_COUNTS)]
 while(True):
     all_done = True
     for cluster in clusters:

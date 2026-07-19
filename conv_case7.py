@@ -15,16 +15,15 @@ STRIDE_W=1
 DILATION=1
 OUTPUT_ROWS_PER_CTA = 3
 TILE_C = 64
-TILE_M = 128
-TILE_N = 56
+TILE_M = K
+TILE_N = Q
 STAGE_A = 4
 STAGE_B = 4
-K_STAGE = 4
 MULTICAST = 8
 CLUSTER_COUNTS = 3
 SM_COUNTS = 24
 SM_MMA_MACS = 4096
-MMA_UTIL = 0.83
+MMA_UTIL = 0.65 #?
 MBARRIER_SYNC_CYCLES = 20 #?
 L2_RT_LAT = 250
 L2_RD_BW_PER_SM = 96
@@ -36,6 +35,7 @@ NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
+FORCE_HIT = False
 
 class L2CACHE:
     def __init__(self, size):
@@ -55,8 +55,10 @@ class L2CACHE:
         else:
             raise ValueError("Unknown data type")
 
-    def access(self, data_type, start_X, start_Y, start_Z):
+    def access(self, data_type, start_X, start_Y, start_Z = 0):
         self.access_count += 1
+        if FORCE_HIT:
+            return True, 0
         if (data_type, start_X, start_Y, start_Z) in self.cache:
             self.cache[(data_type, start_X, start_Y, start_Z)] = self.access_count
             self.hit_count += 1
@@ -79,8 +81,9 @@ class L2CACHE:
 L2 = L2CACHE(size=36 * 1024 * 1024 * 0.90)  # 36MB L2 cache, effective size 90% of total
 
 class CTA:
-    def __init__(self, cache):
+    def __init__(self, cache, id = 0):
         self.cache = cache
+        self.cta_id = id
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -99,6 +102,7 @@ class CTA:
         coord_start_input_row = coord_start_output_row + ifeature_row_iter * STRIDE_H - PAD_H
 
         if stage_b != self.last_stage_b:
+            #print(f"CTA{self.cta_id} Load ifeature row:{coord_start_input_row} Channel:{c_iter}")
             B_hit, evict = L2.access("B", coord_start_input_row, c_iter, 0)
             B_L2C_Transfer_Bytes_Per_SM = L2.sizeof("B")
             B_NOC_Transfer_Bytes_Per_SM = B_L2C_Transfer_Bytes_Per_SM
@@ -112,7 +116,7 @@ class CTA:
             B_DDR_Transfer_Bytes_Per_SM = 0
             B_NOC_Transfer_Bytes_Per_SM = 0
 
-
+        #print(f"CTA{self.cta_id} Load filter R{r_iter} S{s_iter} C{c_iter}")
         A_hit, evict = L2.access("A", r_iter, s_iter, c_iter)
         A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / MULTICAST
         A_NOC_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM * MULTICAST
@@ -151,7 +155,7 @@ class CTA:
         Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + max(TMA_Tile_Cycles, MMA_Tile_Cycles)
         return Tile_Cycles
 
-def get_cta_tasks(): #persisten kernel
+def get_cta_tasks():
     tile_m = 0
     tile_n = 0
     for tile_m in range(K // TILE_M):
@@ -163,7 +167,7 @@ def get_cta_tasks(): #persisten kernel
 
 task_generator = get_cta_tasks()
 total_tile_cycles = 0
-ctas = [CTA(L2) for _ in range(SM_COUNTS)]
+ctas = [CTA(L2, id) for id in range(SM_COUNTS)]
 
 
 while(True):
@@ -185,14 +189,13 @@ while(True):
         for c_iter in range(C//TILE_C):
             for s_iter in range(S):
                 for r_iter in range(coord_start_r, coord_end_r):
-                    #print(ifeature_row_iter, r_iter, s_iter, c_iter, stage_a, stage_b)
                     for cta in ctas:
                         cta.execute(ifeature_row_iter, r_iter, s_iter, c_iter, stage_a, stage_b)
                     stage_a += 1
             stage_b += 1
                     
     for cta in ctas:
-        print(cta.cycles())
+        #print(cta.cycles())
         total_tile_cycles += cta.cycles()
 
 total_cycles = total_tile_cycles / SM_COUNTS
