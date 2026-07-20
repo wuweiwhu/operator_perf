@@ -136,7 +136,8 @@ class CTA:
             TMA_Cycles = Serilization_Cycles + DDR_RT_LAT
 
         MMA_Cycles = TILE_M * TILE_N * TILE_C / (SM_MMA_MACS * MMA_UTIL)
-
+        if self.cta_id == 0:
+            print(f"CTA{self.cta_id} MMA Start Cycle{max(self.mma_cycles)}")
         self.tma_cycles[stage_a % STAGE_A] = self.mma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         mma_idle_cycles = 0 if stage_a == 0 else self.mma_cycles[(stage_a - 1)%STAGE_A]
         self.mma_cycles[stage_a % STAGE_A] = max(self.tma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
