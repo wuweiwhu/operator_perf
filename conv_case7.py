@@ -35,7 +35,7 @@ NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
-FORCE_HIT = False
+FORCE_HIT = True
 
 class L2CACHE:
     def __init__(self, size):
@@ -140,7 +140,7 @@ class CTA:
             print(f"CTA{self.cta_id} MMA Start Cycle{max(self.mma_cycles)}")
         self.tma_cycles[stage_a % STAGE_A] = self.mma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         mma_idle_cycles = 0 if stage_a == 0 else self.mma_cycles[(stage_a - 1)%STAGE_A]
-        self.mma_cycles[stage_a % STAGE_A] = max(self.tma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
+        self.mma_cycles[stage_a % STAGE_A] = max(self.tma_cycles[stage_a % STAGE_A], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
     def done(self):
         return self.tile_m == None or self.tile_n == None
     def cycles(self):

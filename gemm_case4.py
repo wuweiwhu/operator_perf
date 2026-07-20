@@ -69,7 +69,7 @@ class CGA:
         #for stage in range(1, min(K_STAGE, tile_k+1)):
         #    mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
         mma_idle_cycles = 0 if tile_k == 0 else self.mma_cycles[(tile_k - 1)%K_STAGE]
-        self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES, mma_idle_cycles) + MMA_Cycles
+        self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
     def done(self):
         return self.tile_m == None or self.tile_n == None
     def cycles(self):
@@ -78,7 +78,7 @@ class CGA:
         coord_start_m = self.tile_m * TILE_M_CGA
         coord_start_n = self.tile_n * TILE_N_CGA
         _, evict = L2.access("C", coord_start_m, coord_start_n)
-        C_Cycles = max(L2.sizeof("C") / 8 / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / 8 / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
+        C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
         TMA_Tile_Cycles = max(self.tma_cycles)
         MMA_Tile_Cycles = max(self.mma_cycles)
         Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + max(TMA_Tile_Cycles, MMA_Tile_Cycles)
