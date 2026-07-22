@@ -24,7 +24,7 @@ CLUSTER_COUNTS = 3
 SM_COUNTS = 24
 SM_MMA_MACS = 4096
 MMA_UTIL = 0.84 * 56 / 64
-MBARRIER_SYNC_CYCLES = 160
+MBARRIER_SYNC_CYCLES = 40
 L2_RT_LAT = 270
 L2_RD_BW_PER_SM = 96
 L2_WR_BW_PER_SM = 48
@@ -36,6 +36,8 @@ DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
 FORCE_HIT = True
+PROLOGUE_CYCLES_EXTRA = 2000
+EPILOGUE_CYCLES_EXTRA = 3000
 
 class L2CACHE:
     def __init__(self, size):
@@ -136,8 +138,8 @@ class CTA:
             TMA_Cycles = Serilization_Cycles + DDR_RT_LAT
 
         MMA_Cycles = TILE_M * TILE_N * TILE_C / (SM_MMA_MACS * MMA_UTIL)
-        if self.cta_id == 0:
-            print(f"CTA{self.cta_id} MMA Start Cycle{max(self.mma_cycles)}")
+        #if self.cta_id == 0:
+            #print(f"CTA{self.cta_id} MMA Start Cycle{max(self.mma_cycles)}")
         self.tma_cycles[stage_a % STAGE_A] = self.mma_cycles[stage_a % STAGE_A] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         mma_idle_cycles = 0 if stage_a == 0 else self.mma_cycles[(stage_a - 1)%STAGE_A]
         self.mma_cycles[stage_a % STAGE_A] = max(self.tma_cycles[stage_a % STAGE_A], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
@@ -151,9 +153,10 @@ class CTA:
         coord_start_n = self.tile_n * TILE_N
         _, evict = L2.access("C", coord_start_m, coord_start_n, 0)
         C_Cycles = max(L2.sizeof("C") / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
-        TMA_Tile_Cycles = max(self.tma_cycles)
-        MMA_Tile_Cycles = max(self.mma_cycles)
-        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + max(TMA_Tile_Cycles, MMA_Tile_Cycles)
+        mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
+        if self.cta_id == 0:
+            print(f"prologue: PROLOGUE_CYCLES_EXTRA, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
+        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
 
 def get_cta_tasks():
