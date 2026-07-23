@@ -36,8 +36,8 @@ DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
 FORCE_HIT = True
-PROLOGUE_CYCLES_EXTRA = 2000
-EPILOGUE_CYCLES_EXTRA = 3000
+PROLOGUE_CYCLES_EXTRA = 3000
+EPILOGUE_CYCLES_EXTRA = 0
 
 class L2CACHE:
     def __init__(self, size):
@@ -149,13 +149,14 @@ class CTA:
         if self.done():
             return 0
         # FIXME
-        coord_start_m = self.tile_m * TILE_M
-        coord_start_n = self.tile_n * TILE_N
+        coord_start_m = self.tile_m
+        coord_start_n = self.tile_n
         _, evict = L2.access("C", coord_start_m, coord_start_n, 0)
         C_Cycles = max(L2.sizeof("C") / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
+        #ADMEM read cycles should be overlapped
         mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
         if self.cta_id == 0:
-            print(f"prologue: PROLOGUE_CYCLES_EXTRA, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
+            print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
         Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
 

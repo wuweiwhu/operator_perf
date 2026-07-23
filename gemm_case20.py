@@ -1,6 +1,6 @@
 import math
 Prob_M = 128
-Prob_N = 2048
+Prob_N = 3072
 Prob_K = 2048
 BLOCKS_IN_GGA = 8
 MULTICAST = 8
@@ -8,11 +8,11 @@ K_STAGE = 4
 TILE_M_CGA = 128
 TILE_N_CGA = 1024
 TILE_K = 128
-CLUSTER_COUNTS = 2
+CLUSTER_COUNTS = 3
 SM_COUNTS = 24
 SM_MMA_MACS = 16384
 MMA_UTIL = 0.74
-MBARRIER_SYNC_CYCLES = 160
+MBARRIER_SYNC_CYCLES = 40
 L2_RT_LAT = 270
 # Only 16 SM, Should be full B/W
 L2_RD_BW_PER_SM = 128
@@ -24,8 +24,9 @@ NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
-FORCE_HIT = False
-
+FORCE_HIT = True
+PROLOGUE_CYCLES_EXTRA = 2000
+EPILOGUE_CYCLES_EXTRA = 3000
 class CGA:
     def __init__(self, cache, id):
         self.cache = cache
@@ -50,7 +51,7 @@ class CGA:
         B_DDR_Transfer_Bytes_Per_SM = 0
         A_hit, evict = L2.access("A", coord_start_m, coord_start_k)
         if not A_hit:
-            A_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("A") + evict) / 8
+            A_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("A") + evict) / BLOCKS_IN_GGA
         B_hit, evict = L2.access("B", coord_start_n, coord_start_k)
         if not B_hit:
             B_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("B") + evict)
@@ -66,9 +67,6 @@ class CGA:
         MMA_Cycles = TILE_M_CGA * TILE_M_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
 
         self.tma_cycles[tile_k % K_STAGE] = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
-        #mma_idle_cycles = 0
-        #for stage in range(1, min(K_STAGE, tile_k+1)):
-        #    mma_idle_cycles = max(self.mma_cycles[(tile_k-stage) % K_STAGE], mma_idle_cycles)
         mma_idle_cycles = 0 if tile_k == 0 else self.mma_cycles[(tile_k - 1)%K_STAGE]
         self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
     def done(self):
@@ -80,9 +78,10 @@ class CGA:
         coord_start_n = self.tile_n * TILE_N_CGA
         _, evict = L2.access("C", coord_start_m, coord_start_n)
         C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
-        TMA_Tile_Cycles = max(self.tma_cycles)
-        MMA_Tile_Cycles = max(self.mma_cycles)
-        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + max(TMA_Tile_Cycles, MMA_Tile_Cycles)
+        mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
+        if self.cga_id == 0:
+            print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
+        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
 
 class L2CACHE:
@@ -99,7 +98,7 @@ class L2CACHE:
         elif data_type == "B":
             return TILE_N_CGA * TILE_K * (1+1/32)
         elif data_type == "C":
-            return TILE_M_CGA * TILE_N_CGA * 2
+            return TILE_M_CGA * TILE_N_CGA * 4
         else:
             raise ValueError("Unknown data type")
 

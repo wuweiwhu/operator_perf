@@ -24,6 +24,8 @@ DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
 FORCE_HIT = True
+PROLOGUE_CYCLES_EXTRA = 2000
+EPILOGUE_CYCLES_EXTRA = 3000
 
 class CGA:
     def __init__(self, cache, id = 0):
@@ -79,9 +81,10 @@ class CGA:
         coord_start_n = self.tile_n * TILE_N_CGA
         _, evict = L2.access("C", coord_start_m, coord_start_n)
         C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
-        TMA_Tile_Cycles = max(self.tma_cycles)
-        MMA_Tile_Cycles = max(self.mma_cycles)
-        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + max(TMA_Tile_Cycles, MMA_Tile_Cycles)
+        mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
+        if self.cga_id == 0:
+            print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
+        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
 
 class L2CACHE:
