@@ -23,7 +23,7 @@ NOC_WR_BW_PER_SM = 64
 NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
-DDR_UTIL = 0.70
+DDR_UTIL = min(0.70, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
 FORCE_HIT = False
 PROLOGUE_CYCLES_EXTRA = 0000
 EPILOGUE_CYCLES_EXTRA = 0000
@@ -59,7 +59,7 @@ class CGA:
         L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
         NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
         DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
-        Serilization_Cycles = max(L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM / (K_STAGE-1)), NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM / (K_STAGE-1)), DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM / (K_STAGE-1)))
+        Serilization_Cycles = max(L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM * L2_UTIL / (K_STAGE-1)), NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM * NOC_UTIL / (K_STAGE-1)), DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM * DDR_UTIL / (K_STAGE-1)))
         if A_hit and B_hit:
             TMA_Cycles = Serilization_Cycles + L2_RT_LAT
         else:
@@ -83,8 +83,8 @@ class CGA:
         _, evict = L2.access("C", coord_start_m, coord_start_n)
         C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
         mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
-        if self.cga_id == 0:
-            print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
+        #if self.cga_id == 0:
+            #print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
         Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
 
@@ -162,7 +162,7 @@ while(True):
             cluster.execute(tile_k)
     for cluster in clusters:
         #print(cluster.cycles())
-        print(f"This wave execute: {cluster.tile_m} {cluster.tile_n}")
+        print(f"Execute: {cluster.tile_m} {cluster.tile_n}, Cycles: {cluster.cycles()}")
         total_tile_cycles += cluster.cycles()
 
 CGA_TILES = Prob_M // TILE_M_CGA * Prob_N // TILE_N_CGA
