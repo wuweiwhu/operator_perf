@@ -132,12 +132,17 @@ class L2CACHE:
 L2 = L2CACHE(size=36 * 1024 * 1024 * 0.90)  # 36MB L2 cache, effective size 90% of total
 
 def get_cga_tasks():
-    for task_id in range(Prob_M // TILE_M_CGA * Prob_N // TILE_N_CGA):
-        old_x = task_id // 8
-        old_y = task_id %8
-        tile_x = ((old_y & 1) << 2) + ((old_x >> 2) << 1) + (old_x & 1)
-        tile_y = ((old_y >> 1) << 1) + ((old_x >> 1) & 1)
-        yield (tile_x, tile_y)
+    for old_y in range(Prob_N // TILE_N_CGA):
+        for old_x in range(Prob_M // TILE_M_CGA):
+            # FOR 4K * 4K
+            tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y & 1) << 2)
+            tile_y = ((old_x >> 1) & 1) + ((old_y >> 1) << 1) + ((old_y >> 2) << 2)
+            #tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y >> 1) << 2)
+            #tile_y = ((old_x >> 1) & 1) + ((old_y & 1) << 1) + ((old_y >> 2) << 2)
+            # FOR 2K * 2K
+            #tile_x = (old_x & 1) +  + ((old_y & 1) << 1)
+            #tile_y = ((old_x >> 1) & 1) + ((old_y >> 1) << 1)
+            yield (tile_x, tile_y)
     while(True):
         yield(None, None)
 
