@@ -143,7 +143,7 @@ def get_cga_tasks():
         for old_x in range(Prob_M // TILE_M_CGA):
             # FOR 4K * 4K
             tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y & 1) << 2)
-            tile_y = ((old_x >> 1) & 1) + ((old_y >> 1) << 1) + ((old_y >> 2) << 2)
+            tile_y = ((old_x >> 1) & 1) + (((old_y >> 1) & 1) << 1) + ((old_y >> 2) << 2)
             #tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y >> 1) << 2)
             #tile_y = ((old_x >> 1) & 1) + ((old_y & 1) << 1) + ((old_y >> 2) << 2)
             # FOR 2K * 2K
