@@ -3,15 +3,16 @@ Prob_M = 4096
 Prob_N = 4096
 Prob_K = 4096
 BLOCKS_IN_GGA = 8
-MULTICAST = 2
-K_STAGE = 6
+MULTICAST_A = 2
+MULTICAST_B = 2
+K_STAGE = 4
 TILE_M_CGA = 512
 TILE_N_CGA = 512
-TILE_K = 64
+TILE_K = 256
 CLUSTER_COUNTS = 3
 SM_COUNTS = 24
-SM_MMA_MACS = 4096
-MMA_UTIL = 0.83
+SM_MMA_MACS = 4096 * 8
+MMA_UTIL = 0.92
 MBARRIER_SYNC_CYCLES = 40
 L2_RT_LAT = 270
 L2_RD_BW_PER_SM = 96
@@ -23,9 +24,9 @@ NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = 0.70
-FORCE_HIT = True
-PROLOGUE_CYCLES_EXTRA = 2000
-EPILOGUE_CYCLES_EXTRA = 3000
+FORCE_HIT = False
+PROLOGUE_CYCLES_EXTRA = 0000
+EPILOGUE_CYCLES_EXTRA = 0000
 
 class CGA:
     def __init__(self, cache, id = 0):
@@ -44,17 +45,17 @@ class CGA:
         #print(f"Processing Coord ({coord_start_m}, {coord_start_n})")
         coord_start_k = tile_k * TILE_K
         A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / BLOCKS_IN_GGA
-        A_NOC_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM * MULTICAST
+        A_NOC_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM * MULTICAST_A
         A_DDR_Transfer_Bytes_Per_SM = 0
         B_L2C_Transfer_Bytes_Per_SM = L2.sizeof("B") / BLOCKS_IN_GGA
-        B_NOC_Transfer_Bytes_Per_SM = B_L2C_Transfer_Bytes_Per_SM * MULTICAST
+        B_NOC_Transfer_Bytes_Per_SM = B_L2C_Transfer_Bytes_Per_SM * MULTICAST_B
         B_DDR_Transfer_Bytes_Per_SM = 0
         A_hit, evict = L2.access("A", coord_start_m, coord_start_k)
         if not A_hit:
-            A_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("A") + evict) / 8
+            A_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("A") + evict) / BLOCKS_IN_GGA
         B_hit, evict = L2.access("B", coord_start_n, coord_start_k)
         if not B_hit:
-            B_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("B") + evict) / 8
+            B_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("B") + evict) / BLOCKS_IN_GGA
         L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
         NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
         DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
@@ -97,11 +98,11 @@ class L2CACHE:
     
     def sizeof(self, data_type):
         if data_type == "A":
-            return TILE_M_CGA * TILE_K * 2
+            return TILE_M_CGA * TILE_K * 1/2 * (1+1/8)
         elif data_type == "B":
-            return TILE_N_CGA * TILE_K * 2
+            return TILE_N_CGA * TILE_K * 1/2 * (1+1/8)
         elif data_type == "C":
-            return TILE_M_CGA * TILE_N_CGA * 2
+            return TILE_M_CGA * TILE_N_CGA * 1/2 * (1+1/8)
         else:
             raise ValueError("Unknown data type")
 
@@ -156,6 +157,7 @@ while(True):
             cluster.execute(tile_k)
     for cluster in clusters:
         #print(cluster.cycles())
+        print(f"This wave execute: {cluster.tile_m} {cluster.tile_n}")
         total_tile_cycles += cluster.cycles()
 
 CGA_TILES = Prob_M // TILE_M_CGA * Prob_N // TILE_N_CGA
