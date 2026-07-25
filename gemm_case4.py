@@ -1,4 +1,7 @@
 import math
+ABTYPE = "NVF4"
+CDTYPE = "NVF4"
+#DTYPE = "F16"
 Prob_M = 4096
 Prob_N = 4096
 Prob_K = 4096
@@ -97,12 +100,16 @@ class L2CACHE:
         self.access_count = 0
     
     def sizeof(self, data_type):
+        dtype = {"NVF4" : 1/2 * (1+1/8),
+                 "F16": 2,
+                 "F32": 4,
+                 "MXF8": 1 *(1+1/32)}
         if data_type == "A":
-            return TILE_M_CGA * TILE_K * 1/2 * (1+1/8)
+            return TILE_M_CGA * TILE_K * dtype[ABTYPE]
         elif data_type == "B":
-            return TILE_N_CGA * TILE_K * 1/2 * (1+1/8)
+            return TILE_N_CGA * TILE_K * dtype[ABTYPE]
         elif data_type == "C":
-            return TILE_M_CGA * TILE_N_CGA * 1/2 * (1+1/8)
+            return TILE_M_CGA * TILE_N_CGA * dtype[CDTYPE]
         else:
             raise ValueError("Unknown data type")
 
