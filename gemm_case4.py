@@ -1,10 +1,13 @@
 import math
 ABTYPE = "NVF4"
-CDTYPE = "NVF4"
-#DTYPE = "F16"
+CDTYPE = "F16"
+#DTYPE = "NVF4"
 Prob_M = 4096
 Prob_N = 4096
 Prob_K = 4096
+#Prob_M = 2048
+#Prob_N = 2048
+#Prob_K = 11008
 BLOCKS_IN_GGA = 8
 MULTICAST_A = 2
 MULTICAST_B = 2
@@ -28,6 +31,7 @@ DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = min(0.70, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
 FORCE_HIT = False
+STREAMING_STORE = True
 PROLOGUE_CYCLES_EXTRA = 0000
 EPILOGUE_CYCLES_EXTRA = 0000
 
@@ -35,6 +39,7 @@ class CGA:
     def __init__(self, cache, id = 0):
         self.cache = cache
         self.cga_id = id
+        self.clock = 0
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -68,7 +73,7 @@ class CGA:
         else:
             TMA_Cycles = Serilization_Cycles + DDR_RT_LAT
 
-        MMA_Cycles = TILE_M_CGA * TILE_M_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
+        MMA_Cycles = TILE_M_CGA * TILE_N_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
 
         self.tma_cycles[tile_k % K_STAGE] = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES + TMA_Cycles
         #mma_idle_cycles = 0
@@ -84,57 +89,70 @@ class CGA:
         coord_start_m = self.tile_m * TILE_M_CGA
         coord_start_n = self.tile_n * TILE_N_CGA
         _, evict = L2.access("C", coord_start_m, coord_start_n)
-        C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
+        if not STREAMING_STORE:
+            C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
+        else:
+            C_Cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL)
         mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
-        #if self.cga_id == 0:
-            #print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
+        if self.cga_id == 0:
+            print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
         Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
+
 
 class L2CACHE:
     def __init__(self, size):
         self.size = size
         self.occupancy = 0
+        # cache 字典存储结构: {(data_type, start_X, start_Y): [last_access_timestamp, size_in_bytes]}
         self.cache = dict()
         self.hit_count = 0
         self.access_count = 0
-    
-    def sizeof(self, data_type):
-        dtype = {"NVF4" : 1/2 * (1+1/8),
-                 "F16": 2,
-                 "F32": 4,
-                 "MXF8": 1 *(1+1/32)}
-        if data_type == "A":
-            return TILE_M_CGA * TILE_K * dtype[ABTYPE]
-        elif data_type == "B":
-            return TILE_N_CGA * TILE_K * dtype[ABTYPE]
-        elif data_type == "C":
-            return TILE_M_CGA * TILE_N_CGA * dtype[CDTYPE]
-        else:
-            raise ValueError("Unknown data type")
 
-    def access(self, data_type, start_X, start_Y):
-        self.access_count += 1
-        if FORCE_HIT:
-            return True, 0
-        if (data_type, start_X, start_Y) in self.cache:
-            self.cache[(data_type, start_X, start_Y)] = self.access_count
-            self.hit_count += 1
-            return True, 0
+    def sizeof(self, data_type, tile_m=TILE_M_CGA, tile_n=TILE_N_CGA, tile_k=TILE_K):
+        dtype = {
+            "NVF4": 1/2 * (1 + 1/8),  # 0.5B payload + 1/8 scale factor overhead
+            "F16": 2,
+            "F32": 4,
+            "MXF8": 1 * (1 + 1/32)
+        }
+        if data_type == "A":
+            return tile_m * tile_k * dtype[ABTYPE]
+        elif data_type == "B":
+            return tile_n * tile_k * dtype[ABTYPE]
+        elif data_type == "C":
+            return tile_m * tile_n * dtype[CDTYPE]
         else:
-            if self.occupancy + self.sizeof(data_type) <= self.size:
-                self.cache[(data_type, start_X, start_Y)] = self.access_count
-                self.occupancy += self.sizeof(data_type)
-                return False, 0
-            else:
-                # evict the least recently used block
-                lru_key = min(self.cache, key=self.cache.get)
-                del self.cache[lru_key]
-                self.cache[(data_type, start_X, start_Y)] = self.access_count
-                if lru_key[0] == "C":
-                    return False, self.sizeof("C")
-                else:
-                    return False, 0
+            raise ValueError(f"Unknown data type: {data_type}")
+
+    def access(self, data_type, start_X, start_Y, tile_m=TILE_M_CGA, tile_n=TILE_N_CGA, tile_k=TILE_K):
+        self.access_count += 1
+        key = (data_type, start_X, start_Y)
+        req_size = self.sizeof(data_type, tile_m, tile_n, tile_k)
+
+        if FORCE_HIT:
+            return True, 0.0
+        if STREAMING_STORE and data_type == "C":
+            return False, 0.0
+
+        if key in self.cache:
+            self.cache[key][0] = self.access_count
+            self.hit_count += 1
+            return True, 0.0
+
+        evicted_dirty_bytes = 0.0
+        while self.occupancy + req_size > self.size and len(self.cache) > 0:
+            lru_key = min(self.cache, key=lambda k: self.cache[k][0])
+            _, evicted_size = self.cache[lru_key]
+            self.occupancy -= evicted_size
+            if lru_key[0] == "C":
+                evicted_dirty_bytes += evicted_size
+            del self.cache[lru_key]
+
+        self.cache[key] = [self.access_count, req_size]
+        self.occupancy += req_size
+
+        return False, evicted_dirty_bytes
 
 L2 = L2CACHE(size=36 * 1024 * 1024 * 0.90)  # 36MB L2 cache, effective size 90% of total
 
@@ -155,6 +173,7 @@ def get_cga_tasks():
 
 task_generator = get_cga_tasks()
 total_tile_cycles = 0
+total_cycles = 0
 clusters = [CGA(L2, id) for id in range(CLUSTER_COUNTS)]
 while(True):
     all_done = True
@@ -170,10 +189,13 @@ while(True):
     for cluster in clusters:
         #print(cluster.cycles())
         print(f"Execute: {cluster.tile_m} {cluster.tile_n}, Cycles: {cluster.cycles()}")
+        cluster.clock += cluster.cycles()
+        total_cycles = max(cluster.clock, total_cycles)
         total_tile_cycles += cluster.cycles()
 
 CGA_TILES = Prob_M // TILE_M_CGA * Prob_N // TILE_N_CGA
 Wave_Count = math.ceil(CGA_TILES / CLUSTER_COUNTS)
-total_cycles = total_tile_cycles / CGA_TILES * Wave_Count
-print(f"Total cycles: {total_cycles}")
+total_avg_cycles = total_tile_cycles / CGA_TILES * Wave_Count
+print(f"Total Cycles: {total_cycles}")
+print(f"Total Avg Cycles: {total_avg_cycles}")
 print(f"MMA Utilization: {Prob_M * Prob_N * Prob_K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")
