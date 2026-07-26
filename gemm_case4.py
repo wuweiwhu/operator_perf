@@ -117,6 +117,7 @@ class L2CACHE:
         self.cache = dict()
         self.hit_count = 0
         self.access_count = 0
+        self.stat_requests = 0
         self.evict_class = {
             "C": 0,
             "A": 1,
@@ -141,6 +142,7 @@ class L2CACHE:
 
     def access(self, data_type, start_X, start_Y, tile_m=TILE_M_CGA, tile_n=TILE_N_CGA, tile_k=TILE_K):
         self.access_count += 1
+        self.stat_requests += 1
         key = (data_type, start_X, start_Y)
         req_size = self.sizeof(data_type, tile_m, tile_n, tile_k)
 
@@ -179,7 +181,7 @@ if WRAM_UP:
         for k in range(Prob_K // TILE_K):
             L2.access("B", y, k)
     L2.hit_count = 0
-    L2.access_count = 0
+    L2.stat_requests = 0
 
 def get_cga_tasks():
     for old_y in range(Prob_N // TILE_N_CGA):
@@ -224,5 +226,5 @@ Wave_Count = math.ceil(CGA_TILES / CLUSTER_COUNTS)
 total_avg_cycles = total_tile_cycles / CGA_TILES * Wave_Count
 print(f"Total Cycles: {total_cycles}")
 print(f"Total Avg Cycles: {total_avg_cycles}")
-#print(f"Tile Hit Rate: {L2.hit_count / max(1, L2.access_count) * 100:.2f}% (Hits: {L2.hit_count} / Total: {L2.access_count})")
+#print(f"Tile Hit Rate: {L2.hit_count / max(1, L2.stat_requests) * 100:.2f}% (Hits: {L2.hit_count} / Total: {L2.stat_requests})")
 print(f"MMA Utilization: {Prob_M * Prob_N * Prob_K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")
