@@ -31,7 +31,7 @@ DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
 DDR_UTIL = min(0.70, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
 FORCE_HIT = False
-STREAMING_STORE = True
+STREAMING_STORE = False
 PROLOGUE_CYCLES_EXTRA = 0000
 EPILOGUE_CYCLES_EXTRA = 0000
 
@@ -90,7 +90,11 @@ class CGA:
         coord_start_n = self.tile_n * TILE_N_CGA
         _, evict = L2.access("C", coord_start_m, coord_start_n)
         if not STREAMING_STORE:
-            C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT))
+            if evict > 0:
+                evict_cycles = evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT)
+            else:
+                evict_cycles = 0
+            C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict_cycles)
         else:
             C_Cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL)
         mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
