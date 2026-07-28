@@ -26,18 +26,19 @@ NOC_WR_BW_PER_SM = 64
 NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
-DDR_UTIL = min(0.65, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
+DDR_UTIL = min(0.70, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
 FORCE_HIT = False
 STREAMING_STORE = False
 WRAM_UP = False
-PROLOGUE_CYCLES_EXTRA = 0000
-EPILOGUE_CYCLES_EXTRA = 1000
+PROLOGUE_CYCLES_EXTRA = 000
+EPILOGUE_CYCLES_EXTRA = 400
 
 class CGA:
     def __init__(self, cache, id = 0):
         self.cache = cache
         self.cga_id = id
         self.clock = 0
+        self.wait_data_rdy = 0
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -80,9 +81,11 @@ class CGA:
 
         MMA_Cycles = TILE_M_CGA * TILE_N_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
         mma_idle_cycles = 0 if tile_k == 0 else self.mma_cycles[(tile_k - 1)%K_STAGE]
+        if self.tma_cycles[tile_k % K_STAGE] - mma_idle_cycles > 80:
+            self.wait_data_rdy += 1
         self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
-        if self.cga_id == 0:
-            print(f"stage {tile_k} TMA: {self.tma_cycles[tile_k % K_STAGE]}, MMA: {self.mma_cycles[tile_k % K_STAGE]}")
+        #if self.cga_id == 0:
+            #print(f"stage {tile_k} TMA: {self.tma_cycles[tile_k % K_STAGE]}, MMA: {self.mma_cycles[tile_k % K_STAGE]}")
     def done(self):
         return self.tile_m == None or self.tile_n == None
     def cycles(self):
@@ -213,7 +216,7 @@ while(True):
     for cluster in clusters:
         if not cluster.done():
             cycles_this_tile = cluster.cycles()
-            print(f"Execute: {cluster.tile_m} {cluster.tile_n}, Cycles: {cycles_this_tile}")
+            #print(f"Execute: {cluster.tile_m} {cluster.tile_n}, Cycles: {cycles_this_tile}")
             cluster.clock += cycles_this_tile
             total_cycles = max(cluster.clock, total_cycles)
             total_tile_cycles += cycles_this_tile
@@ -225,3 +228,8 @@ print(f"Total Cycles: {total_cycles}")
 print(f"Total Avg Cycles: {total_avg_cycles}")
 #print(f"Tile Hit Rate: {L2.hit_count / max(1, L2.stat_requests) * 100:.2f}% (Hits: {L2.hit_count} / Total: {L2.stat_requests})")
 print(f"MMA Utilization: {Prob_M * Prob_N * Prob_K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")
+
+wait_tma_total = 0
+for cluster in clusters:
+    wait_tma_total += cluster.wait_data_rdy
+print(f"Wait TMA stage:{wait_tma_total} Total stage:{Prob_M * Prob_K * Prob_N // TILE_M_CGA // TILE_N_CGA // TILE_K}")
