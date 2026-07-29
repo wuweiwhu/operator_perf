@@ -22,7 +22,7 @@ L2_RD_BW_PER_SM = 96
 L2_WR_BW_PER_SM = 48
 L2_UTIL = 0.85
 NOC_RD_BW_PER_SM = 128
-NOC_WR_BW_PER_SM = 64
+NOC_WR_BW_PER_SM = 48
 NOC_UTIL = 0.85
 DDR_RT_LAT = 850
 DDR_BW_PER_SM = 32
@@ -31,7 +31,7 @@ FORCE_HIT = False
 STREAMING_STORE = False
 WRAM_UP = False
 PROLOGUE_CYCLES_EXTRA = 000
-EPILOGUE_EXPOSED_RATIO = 0.4
+EPILOGUE_EXPOSED_RATIO = 0.0
 EPILOGUE_CYCLES_EXTRA = 000
 
 class CGA:
@@ -40,17 +40,21 @@ class CGA:
         self.cga_id = id
         self.clock = 0
         self.wait_data_rdy = 0
+        self.pending_epilogue_bus_cycles = 0
+        self.pending_C_Cycles = 0
+
     def bind(self, tile_m, tile_n):
         self.tile_m = tile_m
         self.tile_n = tile_n
         self.tma_cycles = [0 for _ in range(K_STAGE)]
         self.mma_cycles = [0 for _ in range(K_STAGE)]
+        self.mainloop_req_bus_cycles = 0
+
     def execute(self, tile_k):
         if self.done():
             return
         coord_start_m = self.tile_m
         coord_start_n = self.tile_n
-        #print(f"Processing Coord ({coord_start_m}, {coord_start_n})")
         coord_start_k = tile_k
         A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / BLOCKS_IN_GGA
         A_NOC_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM * MULTICAST_A
@@ -67,6 +71,8 @@ class CGA:
         L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
         NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
         DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
+        
+        self.mainloop_req_bus_cycles += (L2C_Transfer_Bytes_Per_SM//128)*64/(NOC_WR_BW_PER_SM * NOC_UTIL)
 
         Serilization_Cycles = max(
             L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM * L2_UTIL), 
@@ -85,15 +91,28 @@ class CGA:
         if self.tma_cycles[tile_k % K_STAGE] - mma_idle_cycles > 80:
             self.wait_data_rdy += 1
         self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
-        #if self.cga_id == 0:
-            #print(f"stage {tile_k} TMA: {self.tma_cycles[tile_k % K_STAGE]}, MMA: {self.mma_cycles[tile_k % K_STAGE]}")
+
     def done(self):
         return self.tile_m == None or self.tile_n == None
+
     def cycles(self):
         if self.done():
             return 0
+            
         coord_start_m = self.tile_m
         coord_start_n = self.tile_n
+        mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
+
+        available_bus_cycles = mainloop_cycles - self.mainloop_req_bus_cycles
+        required_epilogue_bus_cycles = self.pending_epilogue_bus_cycles + EPILOGUE_CYCLES_EXTRA
+        
+        if available_bus_cycles >= required_epilogue_bus_cycles or required_epilogue_bus_cycles == 0:
+            epilogue_exposed_cycles = 0
+        else:
+            unhidden_bus_cycles = required_epilogue_bus_cycles - available_bus_cycles
+            exposed_ratio = unhidden_bus_cycles / required_epilogue_bus_cycles
+            epilogue_exposed_cycles = exposed_ratio * self.pending_C_Cycles
+
         _, evict = L2.access("C", coord_start_m, coord_start_n)
         if not STREAMING_STORE:
             if evict > 0:
@@ -102,11 +121,16 @@ class CGA:
                 evict_cycles = 0
             C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict_cycles)
         else:
-            C_Cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL)
-        mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
-        #if self.cga_id == 0:
-            #print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
-        Tile_Cycles = C_Cycles * EPILOGUE_EXPOSED_RATIO + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
+            C_Cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + DDR_RT_LAT
+
+        self.pending_C_Cycles = C_Cycles
+        self.pending_epilogue_bus_cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (NOC_WR_BW_PER_SM * NOC_UTIL)
+
+        if EPILOGUE_EXPOSED_RATIO == 0:
+            Tile_Cycles = epilogue_exposed_cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA
+        else:
+            Tile_Cycles = self.pending_C_Cycles * EPILOGUE_EXPOSED_RATIO + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA + EPILOGUE_CYCLES_EXTRA
+            
         return Tile_Cycles
 
 
@@ -114,7 +138,6 @@ class L2CACHE:
     def __init__(self, size):
         self.size = size
         self.occupancy = 0
-        # cache: {(data_type, start_X, start_Y): [last_access_timestamp, size_in_bytes]}
         self.cache = dict()
         self.hit_count = 0
         self.access_count = 0
@@ -127,7 +150,7 @@ class L2CACHE:
 
     def sizeof(self, data_type, tile_m=TILE_M_CGA, tile_n=TILE_N_CGA, tile_k=TILE_K):
         dtype = {
-            "NVF4": 1/2 * (1 + 1/8),  # 0.5B payload + 1/8 scale factor overhead
+            "NVF4": 1/2 * (1 + 1/8), 
             "F16": 2,
             "F32": 4,
             "MXF8": 1 * (1 + 1/32)
@@ -187,14 +210,8 @@ if WRAM_UP:
 def get_cga_tasks():
     for old_y in range(Prob_N // TILE_N_CGA):
         for old_x in range(Prob_M // TILE_M_CGA):
-            # FOR 4K * 4K
             tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y & 1) << 2)
             tile_y = ((old_x >> 1) & 1) + (((old_y >> 1) & 1) << 1) + ((old_y >> 2) << 2)
-            #tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y >> 1) << 2)
-            #tile_y = ((old_x >> 1) & 1) + ((old_y & 1) << 1) + ((old_y >> 2) << 2)
-            # FOR 2K * 2K
-            #tile_x = (old_x & 1) +  + ((old_y & 1) << 1)
-            #tile_y = ((old_x >> 1) & 1) + ((old_y >> 1) << 1)
             yield (tile_x, tile_y)
     while(True):
         yield(None, None)
@@ -203,6 +220,7 @@ task_generator = get_cga_tasks()
 total_tile_cycles = 0
 total_cycles = 0
 clusters = [CGA(L2, id) for id in range(CLUSTER_COUNTS)]
+
 while(True):
     all_done = True
     for cluster in clusters:
@@ -217,17 +235,24 @@ while(True):
     for cluster in clusters:
         if not cluster.done():
             cycles_this_tile = cluster.cycles()
-            #print(f"Execute: {cluster.tile_m} {cluster.tile_n}, Cycles: {cycles_this_tile}")
             cluster.clock += cycles_this_tile
             total_cycles = max(cluster.clock, total_cycles)
             total_tile_cycles += cycles_this_tile
 
+for cluster in clusters:
+    if cluster.pending_C_Cycles > 0:
+        final_epilogue_cycles = cluster.pending_C_Cycles + EPILOGUE_CYCLES_EXTRA
+        cluster.clock += final_epilogue_cycles
+        total_cycles = max(cluster.clock, total_cycles)
+        total_tile_cycles += final_epilogue_cycles
+        cluster.pending_C_Cycles = 0 
+
 CGA_TILES = Prob_M // TILE_M_CGA * Prob_N // TILE_N_CGA
 Wave_Count = math.ceil(CGA_TILES / CLUSTER_COUNTS)
 total_avg_cycles = total_tile_cycles / CGA_TILES * Wave_Count
+
 print(f"Total Cycles: {total_cycles}")
 print(f"Total Avg Cycles: {total_avg_cycles}")
-#print(f"Tile Hit Rate: {L2.hit_count / max(1, L2.stat_requests) * 100:.2f}% (Hits: {L2.hit_count} / Total: {L2.stat_requests})")
 print(f"MMA Utilization: {Prob_M * Prob_N * Prob_K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")
 
 wait_tma_total = 0
