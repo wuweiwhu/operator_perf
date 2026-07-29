@@ -1,6 +1,6 @@
 import math
 ABTYPE = "NVF4"
-CDTYPE = "NVF4"
+CDTYPE = "F16"
 #DTYPE = "NVF4"
 Prob_M = 4096
 Prob_N = 4096
@@ -31,7 +31,8 @@ FORCE_HIT = False
 STREAMING_STORE = False
 WRAM_UP = False
 PROLOGUE_CYCLES_EXTRA = 000
-EPILOGUE_CYCLES_EXTRA = 400
+EPILOGUE_EXPOSED_RATIO = 0.4
+EPILOGUE_CYCLES_EXTRA = 000
 
 class CGA:
     def __init__(self, cache, id = 0):
@@ -105,7 +106,7 @@ class CGA:
         mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
         #if self.cga_id == 0:
             #print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
-        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
+        Tile_Cycles = C_Cycles * EPILOGUE_EXPOSED_RATIO + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
         return Tile_Cycles
 
 
