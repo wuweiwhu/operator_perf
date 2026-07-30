@@ -32,7 +32,7 @@ STREAMING_STORE = False
 WRAM_UP = False
 PROLOGUE_CYCLES_EXTRA = 3000
 EPILOGUE_EXPOSED_RATIO = 0
-EPILOGUE_CYCLES_EXTRA = 200
+EPILOGUE_CYCLES_EXTRA = 300
 
 class CGA:
     def __init__(self, cache, id = 0):
@@ -40,6 +40,7 @@ class CGA:
         self.cga_id = id
         self.clock = PROLOGUE_CYCLES_EXTRA
         self.wait_data_rdy = 0
+        self.wait_cycles = 0
         self.pending_epilogue_bus_cycles = 0
         self.pending_C_Cycles = 0
 
@@ -90,6 +91,7 @@ class CGA:
         mma_idle_cycles = 0 if tile_k == 0 else self.mma_cycles[(tile_k - 1)%K_STAGE]
         if self.tma_cycles[tile_k % K_STAGE] - mma_idle_cycles > 80:
             self.wait_data_rdy += 1
+            self.wait_cycles += (self.tma_cycles[tile_k % K_STAGE] - mma_idle_cycles)
         self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
 
     def done(self):
@@ -255,7 +257,10 @@ print(f"Total Cycles: {total_cycles}")
 print(f"Total Avg Cycles: {total_avg_cycles}")
 print(f"MMA Utilization: {Prob_M * Prob_N * Prob_K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")
 
-wait_tma_total = 0
+wait_tma_total_cnts = 0
+wait_tma_total_cycles = 0
 for cluster in clusters:
-    wait_tma_total += cluster.wait_data_rdy
-print(f"Wait TMA stage:{wait_tma_total} Total stage:{Prob_M * Prob_K * Prob_N // TILE_M_CGA // TILE_N_CGA // TILE_K}")
+    wait_tma_total_cnts += cluster.wait_data_rdy
+    wait_tma_total_cycles +=  cluster.wait_cycles
+#print(f"Wait TMA stage:{wait_tma_total_cnts} Total stage:{Prob_M * Prob_K * Prob_N // TILE_M_CGA // TILE_N_CGA // TILE_K}")
+#print(f"wait_tma_total_cycles: {wait_tma_total_cycles}, Per stage: {wait_tma_total_cycles / (Prob_M * Prob_K * Prob_N // TILE_M_CGA // TILE_N_CGA // TILE_K)}")
