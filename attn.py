@@ -1,154 +1,78 @@
 import math
-ABTYPE = "NVF4"
-CDTYPE = "NVF4"
-#DTYPE = "NVF4"
-Q_HEAD = 32
-KV_HEAD = 4
-SEQ_LEN = 4096
+
+# ================= FA4 GQA 模型参数 =================
+DTYPE_BYTES = 1 # FP16
+SEQ_Q = 4096
+SEQ_KV = 4096
 HEAD_DIM = 128
-BLOCKS_IN_GGA = 2
-MULTICAST_KV = 2
-K_STAGE = 4
-Q_TILE_SEQ = 128
-KV_TILE_SEQ = 128
-TILE_M_CGA= 512
-TILE_N_CGA = 512
-TILE_K = 256
+
+TILE_Q_M = 128
+TILE_KV_N = 128
+Q_TILES_PER_CTA = 2 
+
 CLUSTER_COUNTS = 3
 SM_COUNTS = 24
-SM_MMA_MACS = 4096 * 4
+BLOCKS_IN_GGA = 8
+
+# GQA 配置: 32 Q Heads, 4 KV Heads (8个CTA共享同一组KV)
+MULTICAST_KV = 8 
+
+K_STAGE = 4
+SM_MMA_MACS = 16384 * 8 # 假设较高算力 
 MMA_UTIL = 0.92
 MBARRIER_SYNC_CYCLES = 40
+
+# L2 & NOC 带宽配置
 L2_RT_LAT = 270
 L2_RD_BW_PER_SM = 96
 L2_WR_BW_PER_SM = 48
 L2_UTIL = 0.85
-NOC_RD_BW_PER_SM = 128
-NOC_WR_BW_PER_SM = 64
+NOC_RD_BW_PER_SM = (96 + 128) / 2
+NOC_WR_BW_PER_SM = 48
 NOC_UTIL = 0.85
-DDR_RT_LAT = 850
+DDR_RT_LAT = 920
 DDR_BW_PER_SM = 32
 DDR_UTIL = min(0.70, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
-FORCE_HIT = False
+
+SOFTMAX_CYCLES_PER_TILE = 140 
+
+PROLOGUE_CYCLES_EXTRA = 3000
+EPILOGUE_EXPOSED_RATIO = 0
+EPILOGUE_CYCLES_EXTRA = 200
 STREAMING_STORE = False
-WRAM_UP = False
-PROLOGUE_CYCLES_EXTRA = 100
-EPILOGUE_CYCLES_EXTRA = 400
+FORCE_HIT = False
 
-class CGA:
-    def __init__(self, cache, id = 0):
-        self.cache = cache
-        self.cga_id = id
-        self.clock = 0
-    def bind(self, tile_m, tile_n):
-        self.tile_m = tile_m
-        self.tile_n = tile_n
-        self.tma_cycles = [0 for _ in range(K_STAGE)]
-        self.mma_cycles = [0 for _ in range(K_STAGE)]
-    def execute(self, tile_k):
-        if self.done():
-            return
-        coord_start_m = self.tile_m
-        coord_start_n = self.tile_n
-        #print(f"Processing Coord ({coord_start_m}, {coord_start_n})")
-        coord_start_k = tile_k
-        A_L2C_Transfer_Bytes_Per_SM = L2.sizeof("A") / BLOCKS_IN_GGA
-        A_NOC_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM * MULTICAST_A
-        A_DDR_Transfer_Bytes_Per_SM = 0
-        B_L2C_Transfer_Bytes_Per_SM = L2.sizeof("B") / BLOCKS_IN_GGA
-        B_NOC_Transfer_Bytes_Per_SM = B_L2C_Transfer_Bytes_Per_SM * MULTICAST_B
-        B_DDR_Transfer_Bytes_Per_SM = 0
-        A_hit, evict = L2.access("A", coord_start_m, coord_start_k)
-        if not A_hit:
-            A_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("A") + evict) / BLOCKS_IN_GGA
-        B_hit, evict = L2.access("B", coord_start_n, coord_start_k)
-        if not B_hit:
-            B_DDR_Transfer_Bytes_Per_SM = (L2.sizeof("B") + evict) / BLOCKS_IN_GGA
-        L2C_Transfer_Bytes_Per_SM = A_L2C_Transfer_Bytes_Per_SM + B_L2C_Transfer_Bytes_Per_SM
-        NOC_Transfer_Bytes_Per_SM = A_NOC_Transfer_Bytes_Per_SM + B_NOC_Transfer_Bytes_Per_SM
-        DDR_Transfer_Bytes_Per_SM = A_DDR_Transfer_Bytes_Per_SM + B_DDR_Transfer_Bytes_Per_SM
-
-        Serilization_Cycles = max(
-            L2C_Transfer_Bytes_Per_SM / (L2_RD_BW_PER_SM * L2_UTIL), 
-            NOC_Transfer_Bytes_Per_SM / (NOC_RD_BW_PER_SM * NOC_UTIL), 
-            DDR_Transfer_Bytes_Per_SM / (DDR_BW_PER_SM * DDR_UTIL)
-        )
-        RT_LAT = L2_RT_LAT if (A_hit and B_hit) else DDR_RT_LAT
-
-        request_issue_time = self.mma_cycles[tile_k % K_STAGE] + MBARRIER_SYNC_CYCLES
-        data_ready_time = request_issue_time + RT_LAT
-        bus_acquire_time = data_ready_time if (tile_k == 0) else max(data_ready_time, self.tma_cycles[(tile_k - 1) % K_STAGE])
-        self.tma_cycles[tile_k % K_STAGE] = bus_acquire_time + Serilization_Cycles
-
-        MMA_Cycles = TILE_M_CGA * TILE_N_CGA * TILE_K / (SM_MMA_MACS * BLOCKS_IN_GGA * MMA_UTIL)
-        mma_idle_cycles = 0 if tile_k == 0 else self.mma_cycles[(tile_k - 1)%K_STAGE]
-        self.mma_cycles[tile_k % K_STAGE] = max(self.tma_cycles[tile_k % K_STAGE], mma_idle_cycles) + MBARRIER_SYNC_CYCLES + MMA_Cycles
-        #if self.cga_id == 0:
-            #print(f"stage {tile_k} TMA: {self.tma_cycles[tile_k % K_STAGE]}, MMA: {self.mma_cycles[tile_k % K_STAGE]}")
-    def done(self):
-        return self.tile_m == None or self.tile_n == None
-    def cycles(self):
-        if self.done():
-            return 0
-        coord_start_m = self.tile_m
-        coord_start_n = self.tile_n
-        _, evict = L2.access("C", coord_start_m, coord_start_n)
-        if not STREAMING_STORE:
-            if evict > 0:
-                evict_cycles = evict / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL) + (DDR_RT_LAT - L2_RT_LAT)
-            else:
-                evict_cycles = 0
-            C_Cycles = max(L2.sizeof("C") / BLOCKS_IN_GGA / (L2_WR_BW_PER_SM * L2_UTIL) + L2_RT_LAT, evict_cycles)
-        else:
-            C_Cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (DDR_BW_PER_SM * DDR_UTIL)
-        mainloop_cycles = max(max(self.tma_cycles), max(self.mma_cycles))
-        #if self.cga_id == 0:
-            #print(f"prologue: {PROLOGUE_CYCLES_EXTRA}, mainloop:{mainloop_cycles} cycles, epilogue:{C_Cycles + EPILOGUE_CYCLES_EXTRA} cycles")
-        Tile_Cycles = C_Cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA+ EPILOGUE_CYCLES_EXTRA
-        return Tile_Cycles
-
-
+# ================= L2 Cache 状态机 =================
 class L2CACHE:
     def __init__(self, size):
         self.size = size
         self.occupancy = 0
-        # cache: {(data_type, start_X, start_Y): [last_access_timestamp, size_in_bytes]}
         self.cache = dict()
         self.hit_count = 0
-        self.access_count = 0
         self.stat_requests = 0
+        self.access_count = 0
+        
+        # 优先级定义: O(输出)优先被踢, K/V(流式高复用)居中, Q(整个循环都驻留SRAM/L2)极力保护
         self.evict_class = {
-            "C": 0,
-            "A": 1,
-            "B": 1
+            "O": 0,
+            "K": 1,
+            "V": 1,
+            "Q": 2
         }
 
-    def sizeof(self, data_type, tile_m=TILE_M_CGA, tile_n=TILE_N_CGA, tile_k=TILE_K):
-        dtype = {
-            "NVF4": 1/2 * (1 + 1/8),  # 0.5B payload + 1/8 scale factor overhead
-            "F16": 2,
-            "F32": 4,
-            "MXF8": 1 * (1 + 1/32)
-        }
-        if data_type == "A":
-            return tile_m * tile_k * dtype[ABTYPE]
-        elif data_type == "B":
-            return tile_n * tile_k * dtype[ABTYPE]
-        elif data_type == "C":
-            return tile_m * tile_n * dtype[CDTYPE]
-        else:
-            raise ValueError(f"Unknown data type: {data_type}")
+    def sizeof(self):
+        return 128 * 128 * DTYPE_BYTES
 
-    def access(self, data_type, start_X, start_Y, tile_m=TILE_M_CGA, tile_n=TILE_N_CGA, tile_k=TILE_K):
+    def access(self, data_type, cta_id, step_idx):
         self.access_count += 1
         self.stat_requests += 1
-        key = (data_type, start_X, start_Y)
-        req_size = self.sizeof(data_type, tile_m, tile_n, tile_k)
+        key = (data_type, cta_id, step_idx)
+        req_size = self.sizeof()
 
         if FORCE_HIT:
             self.hit_count += 1
             return True, 0.0
-        if STREAMING_STORE and data_type == "C":
+        if STREAMING_STORE and data_type == "O":
             return False, 0.0
 
         if key in self.cache:
@@ -161,7 +85,7 @@ class L2CACHE:
             lru_key = min(self.cache.keys(), key=lambda k: (self.evict_class[k[0]], self.cache[k][0]))
             _, evicted_size = self.cache[lru_key]
             self.occupancy -= evicted_size
-            if lru_key[0] == "C":
+            if lru_key[0] == "O":
                 evicted_dirty_bytes += evicted_size
             del self.cache[lru_key]
 
@@ -172,58 +96,176 @@ class L2CACHE:
 
 L2 = L2CACHE(size=36 * 1024 * 1024 * 0.90)
 
-if WRAM_UP:
-    for x in range(Prob_M // TILE_M_CGA):
-        for k in range(Prob_K // TILE_K):
-            L2.access("A", x, k)
-    for y in range(Prob_N // TILE_N_CGA):
-        for k in range(Prob_K // TILE_K):
-            L2.access("B", y, k)
-    L2.hit_count = 0
-    L2.stat_requests = 0
+# ================= Attention CTA 建模 =================
+class AttentionCTA:
+    def __init__(self, cta_id):
+        self.cta_id = cta_id
+        self.clock = PROLOGUE_CYCLES_EXTRA
+        self.tc_clock = 0
+        self.simt_clock = 0
+        self.prev_s0_finish = 0
+        self.prev_s1_finish = 0
+        self.pending_epilogue_bus_cycles = 0
+        self.pending_O_Cycles = 0
 
-def get_cga_tasks():
-    for old_y in range(Prob_N // TILE_N_CGA):
-        for old_x in range(Prob_M // TILE_M_CGA):
-            # FOR 4K * 4K
-            tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y & 1) << 2)
-            tile_y = ((old_x >> 1) & 1) + (((old_y >> 1) & 1) << 1) + ((old_y >> 2) << 2)
-            #tile_x = (old_x & 1) + ((old_x >> 2) << 1) + ((old_y >> 1) << 2)
-            #tile_y = ((old_x >> 1) & 1) + ((old_y & 1) << 1) + ((old_y >> 2) << 2)
-            # FOR 2K * 2K
-            #tile_x = (old_x & 1) +  + ((old_y & 1) << 1)
-            #tile_y = ((old_x >> 1) & 1) + ((old_y >> 1) << 1)
-            yield (tile_x, tile_y)
-    while(True):
-        yield(None, None)
+    def bind(self, q_block_idx):
+        self.q_block_idx = q_block_idx
+        self.tma_cycles = [0 for _ in range(K_STAGE)]
+        self.tc_clock = 0
+        self.simt_clock = 0
+        self.prev_s0_finish = 0
+        self.prev_s1_finish = 0
+        self.mainloop_req_bus_cycles = 0
+        
+        # Prologue: L2 拉取 Q Tile
+        q_ddr_bytes = 0
+        for i in range(Q_TILES_PER_CTA):
+            q_idx = q_block_idx * Q_TILES_PER_CTA + i
+            # Q 是每个 CTA 独立拥有的，所以加入 cta_id 区分
+            q_hit, q_evict = L2.access("Q", self.cta_id, q_idx)
+            if not q_hit:
+                q_ddr_bytes += (L2.sizeof() + q_evict) / BLOCKS_IN_GGA
+        
+        # 初始 Q 的 DDR 延迟计入绝对挂钟
+        if q_ddr_bytes > 0:
+            self.clock += q_ddr_bytes / (DDR_BW_PER_SM * DDR_UTIL) + DDR_RT_LAT
 
-task_generator = get_cga_tasks()
-total_tile_cycles = 0
+    def execute(self, kv_step):
+        # 1. 精确的 L2 状态交互 (GQA 组播核心逻辑)
+        # KV 是共享的，因此 cta_id 固定为 0，代表 8个CTA 去 L2 捞同一把 Key
+        k_hit, k_evict = L2.access("K", 0, kv_step)
+        v_hit, v_evict = L2.access("V", 0, kv_step)
+
+        k_ddr_bytes = 0 if k_hit else (L2.sizeof() + k_evict) / BLOCKS_IN_GGA
+        v_ddr_bytes = 0 if v_hit else (L2.sizeof() + v_evict) / BLOCKS_IN_GGA
+
+        L2C_Transfer_Bytes = 2 * L2.sizeof() / BLOCKS_IN_GGA
+        NOC_Transfer_Bytes = L2C_Transfer_Bytes * MULTICAST_KV
+        DDR_Transfer_Bytes = k_ddr_bytes + v_ddr_bytes
+        
+        self.mainloop_req_bus_cycles += (L2C_Transfer_Bytes // 128) * 64 / (NOC_WR_BW_PER_SM * NOC_UTIL)
+
+        Serilization_Cycles = max(
+            L2C_Transfer_Bytes / (L2_RD_BW_PER_SM * L2_UTIL), 
+            NOC_Transfer_Bytes / (NOC_RD_BW_PER_SM * NOC_UTIL), 
+            DDR_Transfer_Bytes / (DDR_BW_PER_SM * DDR_UTIL)
+        )
+        
+        RT_LAT = L2_RT_LAT if (k_hit and v_hit) else DDR_RT_LAT 
+
+        request_issue_time = max(self.tc_clock, self.simt_clock) + MBARRIER_SYNC_CYCLES
+        data_ready_time = request_issue_time + RT_LAT
+        bus_acquire_time = data_ready_time if (kv_step == 0) else max(data_ready_time, self.tma_cycles[(kv_step - 1) % K_STAGE])
+        
+        self.tma_cycles[kv_step % K_STAGE] = bus_acquire_time + Serilization_Cycles
+        kv_ready_time = self.tma_cycles[kv_step % K_STAGE]
+
+        # 2. FA4 Ping-Pong 硬件流水线
+        MACs_PER_TILE = TILE_Q_M * TILE_KV_N * HEAD_DIM
+        MMA_CYCLES = MACs_PER_TILE / (SM_MMA_MACS / SM_COUNTS * MMA_UTIL)
+
+        if kv_step > 0:
+            pv0_start = max(self.tc_clock, self.prev_s0_finish)
+            self.tc_clock = pv0_start + MMA_CYCLES
+            
+        qk0_start = max(self.tc_clock, kv_ready_time)
+        qk0_finish = qk0_start + MMA_CYCLES
+        self.tc_clock = qk0_finish
+        
+        s0_start = max(self.simt_clock, qk0_finish)
+        s0_finish = s0_start + SOFTMAX_CYCLES_PER_TILE
+        self.simt_clock = s0_finish
+        
+        if kv_step > 0:
+            pv1_start = max(self.tc_clock, self.prev_s1_finish)
+            self.tc_clock = pv1_start + MMA_CYCLES
+            
+        qk1_start = max(self.tc_clock, kv_ready_time)
+        qk1_finish = qk1_start + MMA_CYCLES
+        self.tc_clock = qk1_finish
+        
+        s1_start = max(self.simt_clock, qk1_finish)
+        s1_finish = s1_start + SOFTMAX_CYCLES_PER_TILE
+        self.simt_clock = s1_finish
+        
+        self.prev_s0_finish = s0_finish
+        self.prev_s1_finish = s1_finish
+
+    def cycles(self):
+        mainloop_cycles = max(max(self.tma_cycles), self.tc_clock, self.simt_clock)
+
+        # 排空最后一次 PV
+        MACs_PER_TILE = TILE_Q_M * TILE_KV_N * HEAD_DIM
+        MMA_CYCLES = MACs_PER_TILE / (SM_MMA_MACS / SM_COUNTS * MMA_UTIL)
+        mainloop_cycles += 2 * MMA_CYCLES
+
+        available_bus_cycles = mainloop_cycles - self.mainloop_req_bus_cycles
+        required_epilogue_bus_cycles = self.pending_epilogue_bus_cycles + EPILOGUE_CYCLES_EXTRA
+        
+        if available_bus_cycles >= required_epilogue_bus_cycles or required_epilogue_bus_cycles == 0:
+            epilogue_exposed_cycles = 0
+        else:
+            unhidden_bus_cycles = required_epilogue_bus_cycles - available_bus_cycles
+            epilogue_exposed_cycles = (unhidden_bus_cycles / required_epilogue_bus_cycles) * self.pending_O_Cycles
+
+        # O 矩阵写出与 L2 状态交互
+        o_ddr_bytes = 0
+        for i in range(Q_TILES_PER_CTA):
+            q_idx = self.q_block_idx * Q_TILES_PER_CTA + i
+            o_hit, o_evict = L2.access("O", self.cta_id, q_idx)
+            if not STREAMING_STORE:
+                o_ddr_bytes += (L2.sizeof() + o_evict) / BLOCKS_IN_GGA
+            else:
+                o_ddr_bytes += L2.sizeof() / BLOCKS_IN_GGA
+
+        C_Cycles = o_ddr_bytes / (DDR_BW_PER_SM * DDR_UTIL) + DDR_RT_LAT
+
+        self.pending_O_Cycles = C_Cycles
+        self.pending_epilogue_bus_cycles = (2 * L2.sizeof()) / (NOC_WR_BW_PER_SM * NOC_UTIL)
+
+        if EPILOGUE_EXPOSED_RATIO == 0:
+            Tile_Cycles = epilogue_exposed_cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles
+        else:
+            Tile_Cycles = self.pending_O_Cycles * EPILOGUE_EXPOSED_RATIO + MBARRIER_SYNC_CYCLES + mainloop_cycles + EPILOGUE_CYCLES_EXTRA
+            
+        return Tile_Cycles
+
+# ================= 模拟执行主循环 =================
+TOTAL_Q_BLOCKS_PER_CTA = SEQ_Q // (TILE_Q_M * Q_TILES_PER_CTA)
+TOTAL_KV_STEPS = SEQ_KV // TILE_KV_N
+
 total_cycles = 0
-clusters = [CGA(L2, id) for id in range(CLUSTER_COUNTS)]
-while(True):
-    all_done = True
-    for cluster in clusters:
-        (tile_m, tile_n) = next(task_generator)
-        cluster.bind(tile_m, tile_n)
-        all_done = all_done and cluster.done()
-    if all_done:
-        break
-    for tile_k in range(Prob_K // TILE_K):
-        for cluster in clusters:
-            cluster.execute(tile_k)
-    for cluster in clusters:
-        if not cluster.done():
-            cycles_this_tile = cluster.cycles()
-            print(f"Execute: {cluster.tile_m} {cluster.tile_n}, Cycles: {cycles_this_tile}")
-            cluster.clock += cycles_this_tile
-            total_cycles = max(cluster.clock, total_cycles)
-            total_tile_cycles += cycles_this_tile
+# 单个 Cluster 内 8 个 CTA
+ctas = [AttentionCTA(id) for id in range(BLOCKS_IN_GGA)]
 
-CGA_TILES = Prob_M // TILE_M_CGA * Prob_N // TILE_N_CGA
-Wave_Count = math.ceil(CGA_TILES / CLUSTER_COUNTS)
-total_avg_cycles = total_tile_cycles / CGA_TILES * Wave_Count
-print(f"Total Cycles: {total_cycles}")
-print(f"Total Avg Cycles: {total_avg_cycles}")
-#print(f"Tile Hit Rate: {L2.hit_count / max(1, L2.stat_requests) * 100:.2f}% (Hits: {L2.hit_count} / Total: {L2.stat_requests})")
-print(f"MMA Utilization: {Prob_M * Prob_N * Prob_K / (SM_MMA_MACS * SM_COUNTS) / total_cycles * 100}%")
+for q_block in range(TOTAL_Q_BLOCKS_PER_CTA):
+    # 1. Cluster 内所有 CTA 同步 Bind 
+    for cta in ctas:
+        cta.bind(q_block)
+        
+    # 2.模拟 GQA 下的硬件同步执行
+    # CTA0 会触发 KV 缺失进入 DDR，随后 CTA1-7 全部命中 L2！
+    for kv_step in range(TOTAL_KV_STEPS):
+        for cta in ctas:
+            cta.execute(kv_step)
+            
+    # 3. 结算本轮 Cycles
+    for cta in ctas:
+        cycles_this_tile = cta.cycles()
+        cta.clock += cycles_this_tile
+        total_cycles = max(cta.clock, total_cycles)
+
+# 流水线排空 (Pipeline Drain)
+for cta in ctas:
+    if cta.pending_O_Cycles > 0:
+        final_epilogue_cycles = cta.pending_O_Cycles + EPILOGUE_CYCLES_EXTRA
+        cta.clock += final_epilogue_cycles
+        total_cycles = max(cta.clock, total_cycles)
+        cta.pending_O_Cycles = 0 
+
+print(f"Total Cycles: {total_cycles:.1f}")
+print(f"L2 Hit Rate: {L2.hit_count / max(1, L2.stat_requests) * 100:.2f}% (Hits: {L2.hit_count} / Total: {L2.stat_requests})")
+
+TOTAL_MACS = BLOCKS_IN_GGA * TOTAL_Q_BLOCKS_PER_CTA * TOTAL_KV_STEPS * (2 * TILE_Q_M * TILE_KV_N * HEAD_DIM) * 2
+PEAK_MACS = total_cycles * (SM_MMA_MACS / SM_COUNTS * BLOCKS_IN_GGA * MMA_UTIL)
+print(f"MMA Utilization: {TOTAL_MACS / PEAK_MACS * 100:.2f}%")
