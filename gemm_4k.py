@@ -8,7 +8,7 @@ Prob_K = 4096
 BLOCKS_IN_GGA = 8
 MULTICAST_A = 2
 MULTICAST_B = 2
-K_STAGE = 4
+K_STAGE = 5
 TILE_M_CGA = 512
 TILE_N_CGA = 512
 TILE_K = 256
@@ -21,24 +21,24 @@ L2_RT_LAT = 270
 L2_RD_BW_PER_SM = 96
 L2_WR_BW_PER_SM = 48
 L2_UTIL = 0.85
-NOC_RD_BW_PER_SM = 128
+NOC_RD_BW_PER_SM = (96 + 128) / 2
 NOC_WR_BW_PER_SM = 48
 NOC_UTIL = 0.85
-DDR_RT_LAT = 850
+DDR_RT_LAT = 920
 DDR_BW_PER_SM = 32
 DDR_UTIL = min(0.70, 224*0.8*3/(DDR_RT_LAT - L2_RT_LAT))
 FORCE_HIT = False
 STREAMING_STORE = False
 WRAM_UP = False
-PROLOGUE_CYCLES_EXTRA = 000
-EPILOGUE_EXPOSED_RATIO = 0.0
-EPILOGUE_CYCLES_EXTRA = 000
+PROLOGUE_CYCLES_EXTRA = 2000
+EPILOGUE_EXPOSED_RATIO = 0
+EPILOGUE_CYCLES_EXTRA = 200
 
 class CGA:
     def __init__(self, cache, id = 0):
         self.cache = cache
         self.cga_id = id
-        self.clock = 0
+        self.clock = PROLOGUE_CYCLES_EXTRA
         self.wait_data_rdy = 0
         self.pending_epilogue_bus_cycles = 0
         self.pending_C_Cycles = 0
@@ -127,9 +127,9 @@ class CGA:
         self.pending_epilogue_bus_cycles = L2.sizeof("C") / BLOCKS_IN_GGA / (NOC_WR_BW_PER_SM * NOC_UTIL)
 
         if EPILOGUE_EXPOSED_RATIO == 0:
-            Tile_Cycles = epilogue_exposed_cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA
+            Tile_Cycles = epilogue_exposed_cycles + MBARRIER_SYNC_CYCLES + mainloop_cycles
         else:
-            Tile_Cycles = self.pending_C_Cycles * EPILOGUE_EXPOSED_RATIO + MBARRIER_SYNC_CYCLES + mainloop_cycles + PROLOGUE_CYCLES_EXTRA + EPILOGUE_CYCLES_EXTRA
+            Tile_Cycles = self.pending_C_Cycles * EPILOGUE_EXPOSED_RATIO + MBARRIER_SYNC_CYCLES + mainloop_cycles + EPILOGUE_CYCLES_EXTRA
             
         return Tile_Cycles
 
